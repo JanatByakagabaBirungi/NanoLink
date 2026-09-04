@@ -7,10 +7,21 @@ import csv
 import io
 from datetime import datetime
 from flask import Response
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///urls.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Initialize rate limiter based on the user's IP address
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["1000 per day", "100 per hour"],
+    storage_uri="memory://"
+)
 
 db = SQLAlchemy(app)
 
@@ -90,6 +101,34 @@ def url_stats(short_hash):
         }), 200
     else:
         return jsonify({'error': 'URL not found'}), 404
+
+@app.route('/api/stats/export', methods=['GET'])
+def export_stats_csv():
+    # Query all shortened URLs from the database
+    urls = URL.query.all()
+    
+    # Create an in-memory text buffer
+    si = io.StringIO()
+    cw = csv.writer(si)
+    
+    # Write the CSV header row
+    cw.writerow(['ID', 'Original URL', 'Short Hash', 'Total Clicks', 'Creation Date'])
+    
+    # Write the data rows
+    for url in urls:
+        cw.writerow([
+            url.id, 
+            url.original_url, 
+            url.short_hash, 
+            url.clicks, 
+            url.created_at.strftime('%Y-%m-%d %H:%M:%S')
+        ])
+    
+    # Package the buffer content into a downloadable CSV response
+    output = Response(si.getvalue(), mimetype='text/csv')
+    output.headers["Content-Disposition"] = "attachment; filename=snaplink_analytics.csv"
+    
+    return output
 
 # Initialize DB before first request
 with app.app_context():
