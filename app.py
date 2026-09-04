@@ -1,18 +1,16 @@
-from flask import Flask, request, jsonify, redirect
-from flask_sqlalchemy import SQLAlchemy
+import os
 import string
 import random
 import validators
 import csv
 import io
-from datetime import datetime
-from flask import Response
+from datetime import datetime, timezone
+from flask import Flask, request, jsonify, redirect, Response
+from pymongo import MongoClient
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///urls.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Initialize rate limiter based on the user's IP address
 limiter = Limiter(
@@ -22,22 +20,20 @@ limiter = Limiter(
     storage_uri="memory://"
 )
 
-db = SQLAlchemy(app)
+# MongoDB Configuration
+MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/')
+client = MongoClient(MONGO_URI)
+db = client.snaplink
+urls_collection = db.urls
 
-# --- Database Model ---
-class URL(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    original_url = db.Column(db.String(2048), nullable=False)
-    short_hash = db.Column(db.String(10), unique=True, nullable=False)
-    clicks = db.Column(db.Integer, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+# Create a unique index for short_hash to prevent collisions at the DB level
+urls_collection.create_index("short_hash", unique=True)
 
 def generate_short_hash(length=6):
     characters = string.ascii_letters + string.digits
     while True:
         short_hash = ''.join(random.choices(characters, k=length))
-        # Ensure the hash doesn't already exist
-        if not URL.query.filter_by(short_hash=short_hash).first():
+        if not urls_collection.find_one({'short_hash': short_hash}):
             return short_hash
 
 # --- API Endpoints ---
@@ -56,17 +52,21 @@ def shorten_url():
     if not validators.url(original_url):
         return jsonify({'error': 'Invalid URL format provided'}), 400
 
-    # Handle custom alias if provided
     if custom_alias:
-        if URL.query.filter_by(short_hash=custom_alias).first():
+        if urls_collection.find_one({'short_hash': custom_alias}):
             return jsonify({'error': 'Custom alias already in use'}), 409
         short_hash = custom_alias
     else:
         short_hash = generate_short_hash()
 
-    new_url = URL(original_url=original_url, short_hash=short_hash)
-    db.session.add(new_url)
-    db.session.commit()
+    new_url_document = {
+        'original_url': original_url,
+        'short_hash': short_hash,
+        'clicks': 0,
+        'created_at': datetime.now(timezone.utc)
+    }
+    
+    urls_collection.insert_one(new_url_document)
 
     return jsonify({
         'message': 'URL shortened successfully',
@@ -78,61 +78,55 @@ def shorten_url():
 
 @app.route('/<short_hash>', methods=['GET'])
 def redirect_to_url(short_hash):
-    url_entry = URL.query.filter_by(short_hash=short_hash).first()
+    # Find the URL and increment the click count in a single atomic operation
+    url_entry = urls_collection.find_one_and_update(
+        {'short_hash': short_hash},
+        {'$inc': {'clicks': 1}}
+    )
     
     if url_entry:
-        url_entry.clicks += 1
-        db.session.commit()
-        return redirect(url_entry.original_url)
+        return redirect(url_entry['original_url'])
     else:
         return jsonify({'error': 'URL not found'}), 404
 
 
 @app.route('/api/stats/<short_hash>', methods=['GET'])
 def url_stats(short_hash):
-    url_entry = URL.query.filter_by(short_hash=short_hash).first()
+    url_entry = urls_collection.find_one({'short_hash': short_hash})
     
     if url_entry:
         return jsonify({
-            'original_url': url_entry.original_url,
-            'short_hash': url_entry.short_hash,
-            'clicks': url_entry.clicks,
-            'created_at': url_entry.created_at.isoformat()
+            'original_url': url_entry['original_url'],
+            'short_hash': url_entry['short_hash'],
+            'clicks': url_entry['clicks'],
+            'created_at': url_entry['created_at'].isoformat()
         }), 200
     else:
         return jsonify({'error': 'URL not found'}), 404
 
 @app.route('/api/stats/export', methods=['GET'])
 def export_stats_csv():
-    # Query all shortened URLs from the database
-    urls = URL.query.all()
+    urls = urls_collection.find()
     
-    # Create an in-memory text buffer
     si = io.StringIO()
     cw = csv.writer(si)
-    
-    # Write the CSV header row
     cw.writerow(['ID', 'Original URL', 'Short Hash', 'Total Clicks', 'Creation Date'])
     
-    # Write the data rows
     for url in urls:
+        # MongoDB uses _id which is an ObjectId, converting it to string for the CSV
         cw.writerow([
-            url.id, 
-            url.original_url, 
-            url.short_hash, 
-            url.clicks, 
-            url.created_at.strftime('%Y-%m-%d %H:%M:%S')
+            str(url['_id']), 
+            url['original_url'], 
+            url['short_hash'], 
+            url['clicks'], 
+            url['created_at'].strftime('%Y-%m-%d %H:%M:%S')
         ])
     
-    # Package the buffer content into a downloadable CSV response
     output = Response(si.getvalue(), mimetype='text/csv')
     output.headers["Content-Disposition"] = "attachment; filename=snaplink_analytics.csv"
     
     return output
 
-# Initialize DB before first request
-with app.app_context():
-    db.create_all()
-
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Bind to 0.0.0.0 so the Flask server is accessible outside the Docker container
+    app.run(host='0.0.0.0', port=5000, debug=True)
