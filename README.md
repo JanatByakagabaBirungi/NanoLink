@@ -24,5 +24,5 @@ The easiest way to run the application is via Docker.
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/yourusername/NanoLink.git](https://github.com/yourusername/NanoLink.git)
+   git clone [https://github.com/JanatByakagabaBirungi/NanoLink.git](https://github.com/JanatByakagabaBirungi/NanoLink.git)
    cd NanoLink
