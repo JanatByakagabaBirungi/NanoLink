@@ -10,7 +10,6 @@ from flask import Response
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///urls.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -44,6 +43,7 @@ def generate_short_hash(length=6):
 # --- API Endpoints ---
 
 @app.route('/api/shorten', methods=['POST'])
+@limiter.limit("10 per minute")
 def shorten_url():
     data = request.get_json()
     
